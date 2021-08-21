@@ -1,0 +1,271 @@
+---
+title: "BIG MART SALES PREDICTION"
+author: Annie N
+output: html_notebook
+---
+# Loading necessary libraries
+```{r}
+library(data.table) 
+  library(dplyr)  
+  library(ggplot2) 
+  library(corrplot)
+  library(xgboost)    
+  library(cowplot)
+  library(caret)
+  library(glmnet)
+  library(ranger)
+  library(reshape2)
+```
+# Reading data
+```{r}
+data_train <- read.csv('train_v9rqX0R.csv') # Loading training data
+data_test <- read.csv('test_AbJTz2l.csv') # Loading testing data
+data_submission <- read.csv('sample_submission_8RXa3c6.csv') # Loading submission data
+```
+
+## Exploring training data
+```{r}
+str(data_train)
+summary(data_train)
+```
+
+The training dataset contains 8523 obervations of 12 variables, including 1 dependent/target variable (Item_Outlet_sales) and 11 independent variables.There are missing values in Item_weight.
+
+## Exploring testing data
+```{r}
+str(data_test)
+summary(data_test)
+```
+The testing dataset contains 5681 observations of 11 indepdent variables. There is no target variable (Item_Outlet_sales) because we would use this dataset to predict. There are 976 missing values in Item_weight
+
+```{r}
+str(data_submission)
+summary(data_submission)
+```
+The Sample Submission dataset contains the format that we have to predict.
+
+# Combining Data for data wrangling
+```{r}
+data_test$Item_Outlet_Sales <- NA
+data_combine <- rbind(data_train, data_test)  
+```
+
+# Exploring training data
+
+## Exploring target variable
+
+```{r}
+ggplot(data_combine) + geom_histogram(aes(data_combine$Item_Outlet_Sales), binwidth = 100, fill = 'steelblue') + xlab(data_combine$Item_Outlet_sales)
+
+```
+
+The target variable is a right skwed variable.
+
+## Exploring numeric independent variables
+```{r}
+p1 = ggplot(data_combine) + geom_histogram(aes(Item_Weight), binwidth = 0.5, fill = 'steelblue')
+p2 = ggplot(data_combine) + geom_histogram(aes(Item_Visibility), binwidth = 0.005, fill = 'steelblue')
+p3 = ggplot(data_combine) + geom_histogram(aes(Item_MRP), binwidth = 1, fill = 'steelblue')
+plot_grid(p1, p2, p3, nrow = 1)
+```
+
+From the above plots, we can see that:
+* Item_weight: no clear distribution
+* Item_Visibility: right-skewed
+* Item_MRP: 4 different distribution
+
+## Exploring categorical independent variables
+
+```{r}
+ggplot(data_combine %>% 
+         group_by(Item_Fat_Content) %>%
+         summarise(Count = n())
+       ) +
+geom_bar(aes(Item_Fat_Content, Count), stat = 'identity', fill = 'lightcoral') # Visualzing Item_Fat_Content
+```
+We see that 'LF', 'low fat' and 'Low Fat' are the same category. Besides, 'reg' and 'Regular' are the same category. We would need to combine these categories into one in plot.
+```{r}
+data_train$Item_Fat_Content[data_train$Item_Fat_Content == 'LF'] = 'Low Fat'
+data_train$Item_Fat_Content[data_train$Item_Fat_Content == 'low fat'] = 'Low Fat'
+data_train$Item_Fat_Content[data_train$Item_Fat_Content == 'reg'] = 'Regular'
+ggplot(data_train %>%
+         group_by(Item_Fat_Content) %>%
+         summarise(Count = n())) +
+  geom_bar(aes(Item_Fat_Content, Count), stat = 'identity', fill = 'lightcoral') # Visualizing Item_Fat_Content after combining all categories in one
+```
+
+
+```{r}
+# Plot for Item_Type
+p4 = ggplot(data_combine %>%
+         group_by(Item_Type) %>%
+         summarise(Count = n())) + geom_bar(aes(Item_Type, Count)
+           , stat = 'identity'
+           , fill = 'lightcoral') + xlab('') + geom_label(aes(Item_Type, Count, label = Count), vjust = 0.5) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle('Item_Type')
+
+# Plot for Outlet_Identifier
+p5 = ggplot(data_combine %>%
+         group_by(Outlet_Identifier) %>%
+         summarise(Count = n())) + geom_bar(aes(Outlet_Identifier, Count)
+           , stat = 'identity'
+           , fill = 'lightcoral') + xlab('') + geom_label(aes(Outlet_Identifier, Count, label = Count), vjust = 0.5) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot for Outlet_Size
+p6 = ggplot(data_combine %>%
+         group_by(Outlet_Size) %>%
+         summarise(Count = n())) + geom_bar(aes(Outlet_Size, Count)
+           , stat = 'identity'
+           , fill = 'lightcoral') + xlab('') + geom_label(aes(Outlet_Size, Count, label = Count), vjust = 0.5) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+second_row = plot_grid(p5, p6, nrow = 1) 
+plot_grid(p4, second_row, ncol = 1)
+
+
+```
+
+
+```{r}
+# Plot for Outlet_Establishment_Year
+p7 = ggplot(data_combine %>%
+         group_by(Outlet_Establishment_Year) %>%
+         summarise(Count = n())) + geom_bar(aes(factor(Outlet_Establishment_Year), Count)
+           , stat = 'identity'
+           , fill = 'lightcoral') + geom_label(aes(factor(Outlet_Establishment_Year), Count, label = Count), vjust = 0.5) + xlab('Outlet_Establishment_Year') + theme(axis.text.x = element_text(size = 8.5))
+
+# Plot for Outlet_Type
+p8 = ggplot(data_combine %>%
+         group_by(Outlet_Type) %>%
+         summarise(Count = n())) + geom_bar(aes(factor(Outlet_Type), Count)
+           , stat = 'identity'
+           , fill = 'lightcoral') + geom_label(aes(factor(Outlet_Type), Count, label = Count), vjust = 0.5) + xlab('Outlet_Type') + theme(axis.text.x = element_text(size = 8.5))
+
+# Plot for both variables
+plot_grid(p7, p8, ncol = 2)
+
+```
+
+* Number of observations in 1998 for the outlet establishment is lesser than other that in different years.
+* Supermarket Type 1 is the most popular category of Outlet_Type.
+
+## Exploring the relationship between dependent and independent variables
+### Scatter plots to explore the relationship between target variable and independent numeric variables 
+```{r}
+
+# Item_Outlet_Sales vs Item_Weight
+p9 = ggplot(data_combine) + geom_point(aes(Item_Weight, Item_Outlet_Sales), color = 'red', alpha = 0.3) + theme(axis.title = element_text(size = 8.5))
+
+# Item_Outlet_Sales VS Item_Visibility
+p10 = ggplot(data_combine) + geom_point(aes(Item_Visibility, Item_Outlet_Sales), color = 'red', alpha = 0.3) + theme(axis.title = element_text(size = 8.5))
+
+# Item_OUtlet_Sales VS Item_MRP
+p11 = ggplot(data_combine) + geom_point(aes(Item_MRP, Item_Outlet_Sales), color = 'red', alpha = 0.3) + theme(axis.title = element_text(size = 8.5))
+
+second_row_2 = plot_grid(p10, p11, ncol = 2)
+plot_grid(p9, second_row_2, nrow = 2)
+
+
+```
+
+* Item_Outlet_Sales is spread through the entire range of the Item_Weight.
+* There is several zero value in the relationship between Item_Outlet_Sales and Item_Visibility.
+* There are 4 different segments in the relationship between Item_Outlet_Sales and Item_MRP.
+
+# Deleting all missing values in the dataset
+```{r}
+data_data_combine <- na.omit(data_combine)
+```
+
+# Improving the model's performance
+
+```{r}
+# Classifying Item_Type into perishable and non_perishable items
+perishable <- c('Breads', 'Breakfast', 'Dairy', 'Fruits and Vegetables', 'Meat', 'Seafood')
+non_perishable <- c('Baking Goods', 'Canned', 'Frozen Foods', 'Hard Drinks', 'Health and Hygiene', 'Household', 'Soft Drinks')
+```
+
+```{r}
+# Create a new feature 'Item_Type_new'
+data_combine$Item_Type_new <- ifelse(data_combine$Item_Type %in% perishable, "perishable",
+                                ifelse(data_combine$Item_Type %in% non_perishable, "non_perishable", "not_sure"))
+```
+
+
+```{r}
+data_combine$Item_Category <- substr(data_combine$Item_Identifier,1,2) # Create a new column named Item_category
+
+       
+data_combine$Item_Fat_Content[data_combine$Item_Category == "NC"] = "Non-Edible" # Change the value of Item_Fat_Content wherever Item_category is 'NC'
+
+# Outlet_Years
+data_combine$Outlet_years <- 2021 - data_combine$Outlet_Establishment_Year # Calculate the years of operation
+data_combine$Outlet_Establishment_Year = as.factor(data_combine$Outlet_Establishment_Year) # Change the data type of Outlet_Establishment_Year to factor
+
+
+# Price per unit Weight
+data_combine$Price_per_unit_wt <- data_combine$Item_MRP/data_combine$Item_Weight # Caculate price per weight unit
+
+```
+
+```{r}
+# Assign a label for each 4 chunks of Item_MRP
+data_combine$Item_MRP_Clusters <- ifelse(data_combine$Item_MRP < 69, "1st",
+                                    ifelse(data_combine$Item_MRP >= 69 & data_combine$Item_MRP < 136, "2nd",
+                                    ifelse(data_combine$Item_MRP >= 136 & data_combine$Item_MRP < 203, "3rd", "4th")))
+    
+```
+
+```{r}
+# Labor enconding for the categorical variables
+data_combine$Outlet_size_num <- ifelse(data_combine$Outlet_Size == "Small",0,
+                                     ifelse(data_combine$Outlet_Size == "Medium",1,2))
+data_combine$Outlet_Location_Type_num <- ifelse(data_combine$Outlet_Location_Type == "Tier 3", 0,                                          
+                                              ifelse(data_combine$Outlet_Location_Type == "Tier 2", 1, 2))        
+          
+data_combine$Outlet_Size <- NULL # Removing categorical variables after label encoding
+data_combine$Outlet_Location_Type <- NULL  # Removing categorical variable after label encoding
+          
+```
+
+```{r}
+# Removing Skewness
+data_combine$Item_Visibility <- log(data_combine$Item_Visibility + 1)
+data_combine$Price_per_unit_wt <- log(data_combine$Price_per_unit_wt + 1)   
+      
+# Scaling Numerical Predictors
+num_vars <- which(sapply(data_combine, is.numeric))
+num_vars_names <- names(num_vars)
+data_combine_numeric <- data_combine[, setdiff(num_vars_names, "Item_Output_Scales")]      
+prep_num = preProcess(data_combine_numeric, method=c("center", "scale"))
+data_combine_numeric_norm = predict(prep_num, data_combine_numeric)
+
+data_combine_1 <- select(data_combine, -('Item_Identifier')) # Create a training dataset that does not contain Item_Identifier column
+```
+
+
+```{r}
+# Split again
+trainingRowIndex <- sample(1:nrow(data_combine_1), 0.8*nrow(data_combine_1))
+trainingData <- data_combine_1[trainingRowIndex, ]
+testingData  <- data_combine_1[-trainingRowIndex, ]
+  
+```
+```{r}
+# Creating a linear Model with Item_Outlet_Sales as target variable
+linear_model = lm(Item_Outlet_Sales ~ ., data=trainingData, na.action = na.omit)
+
+# Summarizing the model
+summary(linear_model)
+```
+
+
+
+```{r}
+# Comparing actual values and predicted values
+distPred <- predict(linear_model, data=testingData)
+actuals_preds <- data.frame(cbind(actuals=testingData$Item_Outlet_Sales, predicted=distPred))
+correlation_accuracy <- cor(actuals_preds)
+head(actuals_preds)
+```
+
+
+
