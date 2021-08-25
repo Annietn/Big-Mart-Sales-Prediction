@@ -1,0 +1,206 @@
+---
+title: "BIG MART SALES PREDICTION"
+author: Annie N
+output: html_notebook
+---
+# Loading necessary libraries
+```{r}
+library(data.table) 
+library(dplyr)     
+library(ggplot2)    
+library(caret)      
+library(corrplot)  
+library(xgboost)   
+library(cowplot)
+library(gridExtra)
+library(dummies)
+library(stringr)
+```
+# Reading data
+```{r}
+train <- read.csv('train_v9rqX0R.csv') # Loading training data
+test <- read.csv('test_AbJTz2l.csv') # Loading testing data
+submission <- read.csv('sample_submission_8RXa3c6.csv') # Loading submission data
+```
+
+## Exploring training data
+```{r}
+str(train)
+summary(train)
+```
+
+The training dataset contains 8523 obervations of 12 variables, including 1 dependent/target variable (Item_Outlet_sales) and 11 independent variables.There are missing values in Item_weight.
+
+## Exploring testing data
+```{r}
+str(test)
+summary(test)
+```
+The testing dataset contains 5681 observations of 11 indepdent variables. There is no target variable (Item_Outlet_sales) because we would use this dataset to predict. There are 976 missing values in Item_weight
+
+```{r}
+str(submission)
+summary(submission)
+```
+The Sample Submission dataset contains the format that we have to predict.
+
+# Combinning our train and test dataset
+
+```{r}
+test$Item_Outlet_Sales <- NA
+data_combined <- rbind(train, test)
+dim(data_combined)
+```
+# Exploring numerical independent variable
+```{r}
+
+train_numeric = dplyr::select_if(train, is.numeric)
+names(train_numeric)
+```
+Since Outlet_Establishment_Year is a categorical variablea and Item_Outlet_Sales is our dependent variable, we only need to do one-hot-coding for Item_Weight, Item_Visibility and Item_MRP
+
+## Visualizing numerical independent variable
+
+```{r}
+plot_weight <- ggplot(data_combined) + geom_histogram(aes(Item_Weight), color="steelblue", fill="white")
+plot_visibility <- ggplot(data_combined) + geom_histogram(aes(Item_Visibility), color="steelblue", fill="white")
+plot_mrp <- ggplot(data_combined) + geom_histogram(aes(Item_MRP), color="steelblue", fill="white", binwidth = 0.5)
+grid.arrange(plot_weight, plot_visibility, plot_mrp, ncol = 2, nrow = 2)
+```
+
+Observations:
+* Item_weight: no clear distribution
+* Item_Visibility: right-skewed
+* Item_MRP: 4 different distribution
+
+# Exploring categorical independent variables 
+```{r}
+ggplot(data_combined %>% group_by(Item_Type) %>% summarise(Count = n())) +   geom_bar(aes(Item_Type, Count, , fill = interaction(Item_Type, Count, sep = ": ")), stat = "identity") + xlab("") + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8)) + ggtitle("Item_Type")
+
+```
+```{r}
+plot_outletSize <- ggplot(data_combined %>% group_by(Outlet_Size) %>% summarise(Count = n())) +   geom_bar(aes(Outlet_Size, Count), stat = "identity", fill = "lightblue") +  geom_label(aes(Outlet_Size, Count, label = Count), vjust = 0.5, size =2.5) +  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+plot_fatContent <- ggplot(data_combined %>% group_by(Item_Fat_Content) %>% summarise(Count = n())) +   geom_bar(aes(Item_Fat_Content, Count), stat = "identity", fill = "lightblue") + geom_label(aes(Item_Fat_Content, Count, label = Count), vjust = 0.5, size = 2.5) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+grid.arrange(plot_outletSize, plot_fatContent, ncol = 2)
+```
+We see that 'LF', 'low fat' and 'Low Fat' are the same category. Besides, 'reg' and 'Regular' are the same category. We would need to combine these categories into one
+
+# Explore the relationship between numerical independent variables with dependent variable
+```{r}
+plot1 <- ggplot(train) + geom_point(aes(Item_Weight, Item_Outlet_Sales), colour = "orange", alpha = 0.3) + theme(axis.title = element_text(size = 8.5))
+
+plot2 <- ggplot(train) + geom_point(aes(Item_Visibility, Item_Outlet_Sales), colour = "orange", alpha = 0.3) +theme(axis.title = element_text(size = 8.5))
+
+plot3 <- ggplot(train) + geom_point(aes(Item_MRP, Item_Outlet_Sales), colour = "orange", alpha = 0.3) + theme(axis.title = element_text(size = 8.5))
+
+second_row_2 = plot_grid(plot2, plot3, ncol = 2)
+plot_grid(plot1, second_row_2, nrow = 2)
+```
+
+Observations:
+
+* Item_Weight vs Item_Outlet_Sales: No obvious pattern
+* Item_Visibility vs Item_Outlet_Sales: negative relationship - more visible, lower its sales will be. Besides, there is a number of Item_Visibility that is equal to zero.
+* Item_MRP vs Item_Outlet_Sales: 4 different segments of prices
+
+
+
+```{r}
+plot4 <- ggplot(train) + geom_boxplot(aes(Outlet_Identifier, sqrt(Item_Outlet_Sales), fill = Outlet_Type)) + theme_minimal() + theme(axis.text.x = element_text(angle = 90))
+plot4
+```
+Customers seem to buy more products at supermarket than grocery store.
+
+# Combining different Item_Fat_Content categories into two categories.
+```{r}
+data_combined$Item_Fat_Content <-str_replace(str_replace(str_replace(data_combined$Item_Fat_Content,"LF","Low Fat"),"reg","Regular"),"low fat","Low Fat")
+
+table(data_combined$Item_Fat_Content)
+```
+# Impute missing value by median in Item_Weight variable
+
+```{r}
+sum(is.na(data_combined$Item_Weight))
+```
+
+```{r}
+data_combined$Item_Weight[is.na(data_combined$Item_Weight)] <- 
+  median(data_combined$Item_Weight, na.rm = TRUE)
+
+sum(is.na(data_combined$Item_Weight))
+```
+# Sub-categorizing the Item_Identifier into Drink(DR), Food(FD) and Non-Consumable (NC)
+
+```{r}
+data_combined <- data_combined %>% 
+  mutate(Item_Category = substr(Item_Identifier, 1, 2),
+         Outlet_Age = 2013 - Outlet_Establishment_Year)
+
+table(data_combined$Item_Category)
+```
+
+```{r}
+data_combined$Item_Fat_Content[data_combined$Item_Category == "NC"] = "Non-Edible" 
+
+table(data_combined$Item_Fat_Content)
+```
+
+# One Hot Encoding for categorical data to prepare machine learning algorithms
+```{r}
+data_combined <- dummy.data.frame(data_combined, names = c('Item_Fat_Content', 'Outlet_Size', 'Outlet_Location_Type', 'Outlet_Type', 'Item_Category', 'Outlet_Identifier'), sep ='_')
+
+data_combined <- subset(data_combined, select = -c(Item_Identifier, Item_Type, Outlet_Establishment_Year))
+
+str(data_combined)
+```
+# Removing skewness from the variable Item_Visibility
+```{r}
+data_combined$Item_Visibility <- sqrt(data_combined$Item_Visibility)
+ggplot(data_combined) + geom_histogram(aes(Item_Visibility), bins = 100, color="white", fill="steelblue")
+```
+# Z-score standardization
+```{r}
+
+data_combined$Item_Weight <- scale(data_combined$Item_Weight, center= TRUE, scale=TRUE)
+data_combined$Item_Visibility <- scale(data_combined$Item_Visibility, center= TRUE, scale=TRUE)
+data_combined$Item_MRP <- scale(data_combined$Item_MRP, center= TRUE, scale=TRUE)
+data_combined$Outlet_Age <- scale(data_combined$Outlet_Age, center= TRUE, scale=TRUE)
+
+str(data_combined)
+```
+# spliting the data_combined into train and test data.
+```{r}
+train <- data_combined[1:nrow(train), ]
+test <- data_combined[(nrow(train) + 1):nrow(data_combined), ]
+test <- subset(test, select = -c(Item_Outlet_Sales))
+
+dim(train)
+
+```
+```{r}
+dim(test)
+```
+#  Corplot to explore the correlation among the variables 
+```{r}
+
+corMatrix <- cor(train[, -35])
+corrplot(corMatrix, order = "FPC", method = "color", type = "lower", 
+         tl.cex = 0.6, tl.col = 'black')
+```
+# Linear Regression Model
+```{r}
+linear_reg_mod = lm(Item_Outlet_Sales ~ ., data = train)
+summary(linear_reg_mod)
+```
+The model seems to be widespread with a lot of insignificant variables. We would remove all insignificant variables and rerun the model again.
+```{r}
+linear_reg_mod = lm(Item_Outlet_Sales ~ Item_MRP + Outlet_Identifier_OUT010 + Outlet_Identifier_OUT018 + Outlet_Identifier_OUT019 + Outlet_Identifier_OUT027 + Outlet_Identifier_OUT045, data = train)
+summary(linear_reg_mod)
+```
+# Prediction on testing data
+```{r}
+prediction = predict(linear_reg_mod, test)
+```
+
